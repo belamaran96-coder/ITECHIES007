@@ -2,8 +2,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { AspectRatio, Framework } from "../types";
 
 /**
- * Safely retrieves the API Key from process.env.
- * Handles environments where 'process' might not be defined or key is a string 'undefined'.
+ * Safely retrieves the API Key from the environment.
  */
 const getSafeApiKey = (): string => {
   try {
@@ -12,45 +11,29 @@ const getSafeApiKey = (): string => {
       return key;
     }
   } catch (e) {
-    // process.env is not defined in this context
+    // Environment variables not accessible or defined
   }
   return "";
 };
 
 /**
- * Creates a fresh GoogleGenAI instance for every call.
- * This is crucial to ensure that if a user selects a new key mid-session via openSelectKey,
- * the next API call uses it immediately.
+ * Creates a fresh GoogleGenAI instance.
  */
 const getAIInstance = () => {
   const apiKey = getSafeApiKey();
+  if (!apiKey) {
+    console.warn("API_KEY environment variable is missing. Requests will likely fail.");
+  }
   return new GoogleGenAI({ apiKey });
 };
 
 /**
- * Enhanced error handler that detects API Key issues and permission errors.
- * If an auth error is found, it triggers the official AI Studio key selector.
+ * Standard error handler for API calls.
  */
 const handleApiError = async (error: any) => {
-  const errorMessage = error?.message || "";
-  const win = window as any;
-
-  // Detect specific key/permission related errors
-  const isAuthError = 
-    errorMessage.includes("API Key not found") || 
-    errorMessage.includes("Permission denied") ||
-    errorMessage.includes("API_KEY_INVALID") ||
-    errorMessage.includes("not found") ||
-    errorMessage.includes("403") ||
-    errorMessage.includes("401");
-
-  if (isAuthError && win.aistudio?.openSelectKey) {
-    console.error("Authentication error detected. Requesting key re-selection:", errorMessage);
-    await win.aistudio.openSelectKey();
-    throw new Error("API session issue detected. A key selection dialog has been opened. Please try your request again.");
-  }
-  
-  throw error;
+  const errorMessage = error?.message || "An unexpected error occurred.";
+  console.error("Gemini API Error:", error);
+  throw new Error(errorMessage);
 };
 
 // --- Image Generation ---
@@ -73,7 +56,7 @@ export const generateImage = async (
         return `data:image/png;base64,${part.inlineData.data}`;
       }
     }
-    throw new Error("The model did not return an image. Try refining your prompt.");
+    throw new Error("The model did not return an image.");
   } catch (err) {
     return handleApiError(err);
   }
@@ -174,12 +157,12 @@ export const generateVideo = async (
     });
 
     while (!operation.done) {
-      await new Promise(resolve => setTimeout(resolve, 10000)); // Veo takes time
+      await new Promise(resolve => setTimeout(resolve, 10000));
       operation = await ai.operations.getVideosOperation({ operation: operation });
     }
 
     const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-    if (!downloadLink) throw new Error("Video generation failed. Ensure your API key is from a billed project.");
+    if (!downloadLink) throw new Error("Video generation failed.");
 
     const key = getSafeApiKey();
     const response = await fetch(`${downloadLink}&key=${key}`);
