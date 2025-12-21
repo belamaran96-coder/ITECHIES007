@@ -1,21 +1,56 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AspectRatio, Framework } from "../types";
 
-// Helper to get AI instance. 
-// For Veo (Videos), we need to ensure we use the key from the selector if available.
-const getAI = async (requireUserKey = false) => {
-  // If requesting a user key (e.g. for Veo/Pro Vision high cost), check if selected
-  if (requireUserKey) {
-    const win = window as any;
-    if (win.aistudio && win.aistudio.hasSelectedApiKey) {
-       const hasKey = await win.aistudio.hasSelectedApiKey();
-       if (!hasKey) {
-         // Trigger selection if not present
-         await win.aistudio.openSelectKey();
-       }
+/**
+ * Safely retrieves the API Key from process.env.
+ * Handles environments where 'process' might not be defined or key is a string 'undefined'.
+ */
+const getSafeApiKey = (): string => {
+  try {
+    const key = process.env.API_KEY;
+    if (key && key !== "undefined" && key !== "null" && key !== "") {
+      return key;
     }
+  } catch (e) {
+    // process.env is not defined in this context
   }
-  return new GoogleGenAI({ apiKey: process.env.API_KEY });
+  return "";
+};
+
+/**
+ * Creates a fresh GoogleGenAI instance for every call.
+ * This is crucial to ensure that if a user selects a new key mid-session via openSelectKey,
+ * the next API call uses it immediately.
+ */
+const getAIInstance = () => {
+  const apiKey = getSafeApiKey();
+  return new GoogleGenAI({ apiKey });
+};
+
+/**
+ * Enhanced error handler that detects API Key issues and permission errors.
+ * If an auth error is found, it triggers the official AI Studio key selector.
+ */
+const handleApiError = async (error: any) => {
+  const errorMessage = error?.message || "";
+  const win = window as any;
+
+  // Detect specific key/permission related errors
+  const isAuthError = 
+    errorMessage.includes("API Key not found") || 
+    errorMessage.includes("Permission denied") ||
+    errorMessage.includes("API_KEY_INVALID") ||
+    errorMessage.includes("not found") ||
+    errorMessage.includes("403") ||
+    errorMessage.includes("401");
+
+  if (isAuthError && win.aistudio?.openSelectKey) {
+    console.error("Authentication error detected. Requesting key re-selection:", errorMessage);
+    await win.aistudio.openSelectKey();
+    throw new Error("API session issue detected. A key selection dialog has been opened. Please try your request again.");
+  }
+  
+  throw error;
 };
 
 // --- Image Generation ---
@@ -23,28 +58,25 @@ export const generateImage = async (
   prompt: string,
   aspectRatio: AspectRatio
 ): Promise<string> => {
-  const ai = await getAI(); 
-  
-  // Using gemini-2.5-flash-image for broader availability and to avoid permission issues
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: {
-      parts: [{ text: prompt }]
-    },
-    config: {
-      imageConfig: {
-        aspectRatio: aspectRatio
+  try {
+    const ai = getAIInstance(); 
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: { parts: [{ text: prompt }] },
+      config: {
+        imageConfig: { aspectRatio: aspectRatio }
+      }
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
       }
     }
-  });
-
-  // Extract image
-  for (const part of response.candidates?.[0]?.content?.parts || []) {
-    if (part.inlineData) {
-      return `data:image/png;base64,${part.inlineData.data}`;
-    }
+    throw new Error("The model did not return an image. Try refining your prompt.");
+  } catch (err) {
+    return handleApiError(err);
   }
-  throw new Error("No image generated");
 };
 
 // --- Image Editing ---
@@ -53,29 +85,27 @@ export const editImage = async (
   mimeType: string,
   prompt: string
 ): Promise<string> => {
-  const ai = await getAI();
-  // Using gemini-2.5-flash-image for fast editing
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            data: base64Image,
-            mimeType: mimeType
-          }
-        },
-        { text: prompt }
-      ]
-    }
-  });
+  try {
+    const ai = getAIInstance();
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [
+          { inlineData: { data: base64Image, mimeType: mimeType } },
+          { text: prompt }
+        ]
+      }
+    });
 
-  for (const part of response.candidates?.[0]?.content?.parts || []) {
-    if (part.inlineData) {
-      return `data:image/png;base64,${part.inlineData.data}`;
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
     }
+    throw new Error("Failed to edit the image.");
+  } catch (err) {
+    return handleApiError(err);
   }
-  throw new Error("No edited image generated");
 };
 
 // --- Code Generation ---
@@ -85,62 +115,45 @@ export const generateCodeFromImage = async (
   additionalPrompt: string,
   framework: Framework
 ): Promise<string> => {
-  const ai = await getAI();
-  
-  let frameworkInstructions = "";
-  switch (framework) {
-    case Framework.REACT:
-      frameworkInstructions = "Generate a single-file React functional component (.tsx) using Tailwind CSS. Use 'lucide-react' for icons if needed. Ensure it is production-ready code.";
-      break;
-    case Framework.VUE:
-      frameworkInstructions = "Generate a Vue 3 Single File Component (.vue) using <script setup> and Tailwind CSS. Ensure it is production-ready code.";
-      break;
-    case Framework.VANILLA:
-      frameworkInstructions = "Generate a complete, single-file HTML5 document. Include Tailwind CSS via CDN in the <head>. Include all CSS and Vanilla JavaScript within the file (in <style> and <script> tags).";
-      break;
-  }
-
-  // Using gemini-3-pro-preview for complex reasoning and code gen
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-pro-preview',
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            data: base64Image,
-            mimeType: mimeType
-          }
-        },
-        { 
-          text: `
-            Analyze this UI design image.
-            ${frameworkInstructions}
-            
-            Additional Instructions: ${additionalPrompt}
-
-            Return the response in JSON format with the following schema:
-            {
-              "componentCode": "The full code string (HTML/JSX/Vue)",
-              "explanation": "A comprehensive explanation of the implementation. Detail the structure of the component, specific styling choices (layout, typography, colors using Tailwind), and any interactive logic or state management included to match the design."
-            }
-          ` 
-        }
-      ]
-    },
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          componentCode: { type: Type.STRING },
-          explanation: { type: Type.STRING }
-        },
-        required: ["componentCode", "explanation"]
-      }
+  try {
+    const ai = getAIInstance();
+    let frameworkInstructions = "";
+    switch (framework) {
+      case Framework.REACT:
+        frameworkInstructions = "Generate a single-file React functional component (.tsx) using Tailwind CSS. Use 'lucide-react' for icons.";
+        break;
+      case Framework.VUE:
+        frameworkInstructions = "Generate a Vue 3 SFC (.vue) using <script setup> and Tailwind CSS.";
+        break;
+      case Framework.VANILLA:
+        frameworkInstructions = "Generate a single-file HTML5 document with Tailwind CSS via CDN.";
+        break;
     }
-  });
 
-  return response.text;
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-pro-preview',
+      contents: {
+        parts: [
+          { inlineData: { data: base64Image, mimeType: mimeType } },
+          { text: `${frameworkInstructions}\nAdditional: ${additionalPrompt}\nReturn code in componentCode field and analysis in explanation field.` }
+        ]
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            componentCode: { type: Type.STRING },
+            explanation: { type: Type.STRING }
+          },
+          required: ["componentCode", "explanation"]
+        }
+      }
+    });
+    return response.text;
+  } catch (err) {
+    return handleApiError(err);
+  }
 };
 
 // --- Video Generation ---
@@ -148,37 +161,39 @@ export const generateVideo = async (
   prompt: string,
   aspectRatio: '16:9' | '9:16'
 ): Promise<string> => {
-  // Video generation requires user API key selection
-  const ai = await getAI(true);
-  
-  let operation = await ai.models.generateVideos({
-    model: 'veo-3.1-fast-generate-preview',
-    prompt: prompt,
-    config: {
-      numberOfVideos: 1,
-      resolution: '720p',
-      aspectRatio: aspectRatio
+  try {
+    const ai = getAIInstance();
+    let operation = await ai.models.generateVideos({
+      model: 'veo-3.1-fast-generate-preview',
+      prompt: prompt,
+      config: {
+        numberOfVideos: 1,
+        resolution: '720p',
+        aspectRatio: aspectRatio
+      }
+    });
+
+    while (!operation.done) {
+      await new Promise(resolve => setTimeout(resolve, 10000)); // Veo takes time
+      operation = await ai.operations.getVideosOperation({ operation: operation });
     }
-  });
 
-  // Polling for completion
-  while (!operation.done) {
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    operation = await ai.operations.getVideosOperation({ operation: operation });
+    const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
+    if (!downloadLink) throw new Error("Video generation failed. Ensure your API key is from a billed project.");
+
+    const key = getSafeApiKey();
+    const response = await fetch(`${downloadLink}&key=${key}`);
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+  } catch (err) {
+    return handleApiError(err);
   }
-
-  const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
-  if (!videoUri) throw new Error("Video generation failed");
-
-  // Fetch actual video bytes using the key
-  const response = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
-  const blob = await response.blob();
-  return URL.createObjectURL(blob);
 };
 
 // --- Chat Assistant ---
 export const sendChatMessage = async (history: any[], message: string) => {
-    const ai = await getAI();
+  try {
+    const ai = getAIInstance();
     const chat = ai.chats.create({
         model: 'gemini-3-pro-preview',
         history: history,
@@ -186,7 +201,9 @@ export const sendChatMessage = async (history: any[], message: string) => {
             systemInstruction: "You are an expert Frontend Developer and UI/UX Designer assistant."
         }
     });
-    
     const result = await chat.sendMessage({ message });
     return result.text;
+  } catch (err) {
+    return handleApiError(err);
+  }
 }
