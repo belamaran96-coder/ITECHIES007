@@ -6,10 +6,10 @@ export default async function handler(req, res) {
   }
 
   const { task, payload } = req.body;
-  const apiKey = process.env.API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    return res.status(500).json({ error: 'API_KEY is not configured in Vercel environment variables.' });
+    return res.status(500).json({ error: 'GEMINI_API_KEY is not configured in Vercel environment variables.' });
   }
 
   const ai = new GoogleGenAI({ apiKey });
