@@ -6,11 +6,10 @@ export default async function handler(req, res) {
   }
 
   const { task, payload } = req.body;
-  
-  // Use the system-required environment variable name
   const apiKey = process.env.API_KEY;
+
   if (!apiKey) {
-    return res.status(500).json({ error: 'API_KEY environment variable is not set on the server.' });
+    return res.status(500).json({ error: 'API_KEY is not configured in Vercel environment variables.' });
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -21,12 +20,9 @@ export default async function handler(req, res) {
         const response = await ai.models.generateContent({
           model: 'gemini-2.5-flash-image',
           contents: { parts: [{ text: payload.prompt }] },
-          config: {
-            imageConfig: { aspectRatio: payload.aspectRatio }
-          }
+          config: { imageConfig: { aspectRatio: payload.aspectRatio } }
         });
         const part = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
-        if (!part) throw new Error("No image data returned from model.");
         return res.status(200).json({ data: part.inlineData.data });
       }
 
@@ -41,7 +37,6 @@ export default async function handler(req, res) {
           }
         });
         const part = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
-        if (!part) throw new Error("No edited image data returned.");
         return res.status(200).json({ data: part.inlineData.data });
       }
 
@@ -69,8 +64,8 @@ export default async function handler(req, res) {
         return res.status(200).json(JSON.parse(response.text));
       }
 
-      case 'generateVideo': {
-        let operation = await ai.models.generateVideos({
+      case 'startVideo': {
+        const operation = await ai.models.generateVideos({
           model: 'veo-3.1-fast-generate-preview',
           prompt: payload.prompt,
           config: {
@@ -79,23 +74,28 @@ export default async function handler(req, res) {
             aspectRatio: payload.aspectRatio
           }
         });
+        return res.status(200).json({ operation });
+      }
 
-        // Poll for completion (Vercel Pro/Enterprise recommended for long timeouts)
-        while (!operation.done) {
-          await new Promise(resolve => setTimeout(resolve, 10000));
-          operation = await ai.operations.getVideosOperation({ operation: operation });
+      case 'checkVideo': {
+        const operation = await ai.operations.getVideosOperation({ operation: payload.operation });
+        if (operation.done) {
+          const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
+          return res.status(200).json({ done: true, uri: downloadLink });
         }
+        return res.status(200).json({ done: false });
+      }
 
-        const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-        if (!downloadLink) throw new Error("Video generation failed.");
-        
-        // Return the link and let frontend handle blob or proxy the bytes
-        // To keep it secure, we fetch the bytes on the server and send them
-        const videoResponse = await fetch(`${downloadLink}&key=${apiKey}`);
-        const videoBuffer = await videoResponse.arrayBuffer();
-        
-        res.setHeader('Content-Type', 'video/mp4');
-        return res.send(Buffer.from(videoBuffer));
+      case 'generateChat': {
+        const chat = ai.chats.create({
+          model: 'gemini-3-pro-preview',
+          config: {
+            systemInstruction: "You are ITechies Assistant, an expert Frontend Developer and UI/UX Designer."
+          }
+        });
+        // Note: For a real chat, you'd send the full history here.
+        const response = await chat.sendMessage({ message: payload.message });
+        return res.status(200).json({ text: response.text });
       }
 
       default:
