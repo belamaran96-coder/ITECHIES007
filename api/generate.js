@@ -6,10 +6,10 @@ export default async function handler(req, res) {
   }
 
   const { task, payload } = req.body;
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.API_KEY;
 
   if (!apiKey) {
-    return res.status(500).json({ error: 'GEMINI_API_KEY is not configured in Vercel environment variables.' });
+    return res.status(500).json({ error: 'Server Error: API_KEY is missing in Vercel settings.' });
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -23,6 +23,7 @@ export default async function handler(req, res) {
           config: { imageConfig: { aspectRatio: payload.aspectRatio } }
         });
         const part = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
+        if (!part) throw new Error("No image generated.");
         return res.status(200).json({ data: part.inlineData.data });
       }
 
@@ -81,19 +82,21 @@ export default async function handler(req, res) {
         const operation = await ai.operations.getVideosOperation({ operation: payload.operation });
         if (operation.done) {
           const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
+          // Return the link - the frontend will use our video-proxy to download it
           return res.status(200).json({ done: true, uri: downloadLink });
         }
         return res.status(200).json({ done: false });
       }
 
       case 'generateChat': {
+        // payload.history should be an array of { role: 'user'|'model', parts: [{ text: '...' }] }
         const chat = ai.chats.create({
           model: 'gemini-3-pro-preview',
+          history: payload.history || [],
           config: {
-            systemInstruction: "You are ITechies Assistant, an expert Frontend Developer and UI/UX Designer."
+            systemInstruction: "You are ITechies Assistant, an expert Frontend Developer and UI/UX Designer. Help users with code, design, and technical questions."
           }
         });
-        // Note: For a real chat, you'd send the full history here.
         const response = await chat.sendMessage({ message: payload.message });
         return res.status(200).json({ text: response.text });
       }

@@ -1,66 +1,134 @@
+import { GoogleGenAI, Type } from "@google/genai";
 import { AspectRatio, Framework } from "../types";
 
-const callBackend = async (task: string, payload: any) => {
-  const response = await fetch('/api/generate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task, payload })
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.error || 'Backend request failed');
+// Initialize AI directly in the frontend using the injected API_KEY
+const getAI = () => {
+  if (!process.env.API_KEY) {
+    throw new Error("API_KEY is not defined. Please ensure it is set in your environment.");
   }
-
-  return response.json();
+  return new GoogleGenAI({ apiKey: process.env.API_KEY });
 };
 
 export const generateImage = async (prompt: string, aspectRatio: AspectRatio): Promise<string> => {
-  const result = await callBackend('generateImage', { prompt, aspectRatio });
-  return `data:image/png;base64,${result.data}`;
+  const ai = getAI();
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash-image',
+    contents: { parts: [{ text: prompt }] },
+    config: {
+      imageConfig: {
+        aspectRatio: aspectRatio as any
+      }
+    },
+  });
+
+  const part = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
+  if (!part?.inlineData?.data) throw new Error("No image data returned. Try a different prompt.");
+  
+  return `data:image/png;base64,${part.inlineData.data}`;
 };
 
-export const editImage = async (base64Image: string, mimeType: string, prompt: string): Promise<string> => {
-  const result = await callBackend('editImage', { base64Image, mimeType, prompt });
-  return `data:image/png;base64,${result.data}`;
+export const editImage = async (base64Data: string, mimeType: string, prompt: string): Promise<string> => {
+  const ai = getAI();
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash-image',
+    contents: {
+      parts: [
+        { inlineData: { data: base64Data, mimeType } },
+        { text: prompt }
+      ]
+    }
+  });
+
+  const part = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
+  if (!part?.inlineData?.data) throw new Error("Could not edit image.");
+  
+  return `data:image/png;base64,${part.inlineData.data}`;
 };
 
-export const generateCodeFromImage = async (base64Image: string, mimeType: string, additionalPrompt: string, framework: Framework): Promise<string> => {
+export const generateCodeFromImage = async (
+  base64Data: string, 
+  mimeType: string, 
+  additionalPrompt: string, 
+  framework: Framework
+): Promise<string> => {
+  const ai = getAI();
+  
   let frameworkInstructions = "";
   switch (framework) {
-    case Framework.REACT: frameworkInstructions = "Generate a single-file React functional component (.tsx) using Tailwind CSS. Use 'lucide-react' for icons."; break;
-    case Framework.VUE: frameworkInstructions = "Generate a Vue 3 SFC (.vue) using <script setup> and Tailwind CSS."; break;
-    case Framework.VANILLA: frameworkInstructions = "Generate a single-file HTML5 document with Tailwind CSS via CDN."; break;
+    case Framework.REACT: frameworkInstructions = "React component using Tailwind CSS and Lucide React icons."; break;
+    case Framework.VUE: frameworkInstructions = "Vue 3 SFC using <script setup> and Tailwind CSS."; break;
+    case Framework.VANILLA: frameworkInstructions = "Standard HTML5 file with Tailwind CDN."; break;
   }
 
-  const prompt = `${frameworkInstructions}\nAdditional requirements: ${additionalPrompt}\nReturn code in 'componentCode' field and analysis in 'explanation' field.`;
-  const result = await callBackend('generateCode', { base64Image, mimeType, prompt });
-  return JSON.stringify(result);
+  const prompt = `Convert this UI mockup into ${frameworkInstructions}. 
+    Additional requirements: ${additionalPrompt}. 
+    Return strictly JSON with 'componentCode' and 'explanation'.`;
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-3-pro-preview',
+    contents: {
+      parts: [
+        { inlineData: { data: base64Data, mimeType } },
+        { text: prompt }
+      ]
+    },
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          componentCode: { type: Type.STRING },
+          explanation: { type: Type.STRING }
+        },
+        required: ["componentCode", "explanation"]
+      }
+    }
+  });
+
+  return response.text;
 };
 
 export const generateVideo = async (prompt: string, aspectRatio: '16:9' | '9:16'): Promise<string> => {
-  // 1. Start generation
-  const startResult = await callBackend('startVideo', { prompt, aspectRatio });
-  let operation = startResult.operation;
-
-  // 2. Poll for completion from frontend (avoids serverless timeout)
-  while (true) {
-    await new Promise(resolve => setTimeout(resolve, 10000));
-    const checkResult = await callBackend('checkVideo', { operation });
-    
-    if (checkResult.done) {
-      // The frontend fetches the final video using the URI provided
-      // Note: In Vercel, you need to append the key if downloading directly, 
-      // but since we are handling this via a link, we'll return the URI.
-      // However, for immediate preview, fetching as blob is best:
-      const videoResponse = await fetch(`${checkResult.uri}&key=__API_KEY_PLACEHOLDER__`); // Vercel handles key injection via internal fetch if configured, but here we just return the link or proxy.
-      // Simplified for this demo:
-      return checkResult.uri; 
+  const ai = getAI();
+  
+  // Start the generation
+  let operation = await ai.models.generateVideos({
+    model: 'veo-3.1-fast-generate-preview',
+    prompt: prompt,
+    config: {
+      numberOfVideos: 1,
+      resolution: '720p',
+      aspectRatio: aspectRatio
     }
+  });
+
+  // Poll for completion (Veo is asynchronous)
+  while (!operation.done) {
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    operation = await ai.operations.getVideosOperation({ operation: operation });
   }
+
+  const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
+  if (!downloadLink) throw new Error("Video generation failed to return a file.");
+
+  // Fetch the video through the key-authenticated link
+  const videoResponse = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
+  if (!videoResponse.ok) throw new Error("Failed to download video file.");
+  
+  const blob = await videoResponse.blob();
+  return URL.createObjectURL(blob);
 };
 
 export const sendChatMessage = async (history: any[], message: string): Promise<string> => {
-  const result = await callBackend('generateChat', { history, message });
-  return result.text;
+  const ai = getAI();
+  const chat = ai.chats.create({
+    model: 'gemini-3-pro-preview',
+    history: history,
+    config: {
+      systemInstruction: "You are ITechies Assistant, an expert frontend engineer. Help users with UI/UX and code."
+    }
+  });
+
+  const response = await chat.sendMessage({ message });
+  return response.text || "I couldn't process that request.";
 };

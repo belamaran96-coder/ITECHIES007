@@ -25,25 +25,26 @@ const ChatAssistant: React.FC = () => {
   }, [messages, isOpen]);
 
   const handleSend = async () => {
-    if (!input.trim()) return;
+    if (!input.trim() || loading) return;
     
     const userMsg = input;
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    const newMessages = [...messages, { role: 'user', text: userMsg } as Message];
+    setMessages(newMessages);
     setLoading(true);
 
     try {
-      // Prepare history for API
-      const history = messages.map(m => ({
+      // Map history to the format the Gemini SDK expects
+      const sdkHistory = messages.map(m => ({
         role: m.role,
         parts: [{ text: m.text }]
       }));
       
-      const response = await sendChatMessage(history, userMsg);
+      const response = await sendChatMessage(sdkHistory, userMsg);
       setMessages(prev => [...prev, { role: 'model', text: response }]);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setMessages(prev => [...prev, { role: 'model', text: "Sorry, I encountered an error. Please try again." }]);
+      setMessages(prev => [...prev, { role: 'model', text: `Error: ${err.message}` }]);
     } finally {
       setLoading(false);
     }
@@ -61,8 +62,7 @@ const ChatAssistant: React.FC = () => {
       )}
 
       {isOpen && (
-        <div className="w-96 h-[500px] bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-bottom-5 fade-in duration-300">
-          {/* Header */}
+        <div className="w-96 h-[500px] bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
           <div className="p-4 border-b border-gray-800 bg-gray-800/50 flex items-center justify-between">
             <h3 className="font-semibold text-white flex items-center gap-2">
               <Bot className="w-5 h-5 text-indigo-400" />
@@ -76,7 +76,6 @@ const ChatAssistant: React.FC = () => {
             </button>
           </div>
 
-          {/* Messages */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-900">
             {messages.map((msg, idx) => (
               <div
@@ -110,7 +109,6 @@ const ChatAssistant: React.FC = () => {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Input */}
           <div className="p-4 bg-gray-800/50 border-t border-gray-800">
             <div className="flex gap-2">
               <input
